@@ -1,6 +1,7 @@
 import express from 'express';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { z } from 'zod';
 import axios from "axios";
 
@@ -31,22 +32,8 @@ const CG_HEADER = {
   "accept": 'application/json'
 }
 
-// Handle MCP requests via POST /mcp
-app.post('/mcp', async (req, res) => {
-  // Log incoming MCP request
-  logRequest('MCP_REQUEST', {
-    method: req.method,
-    url: req.url,
-    headers: req.headers,
-    body: req.body,
-    userAgent: req.get('User-Agent'),
-    ip: req.ip,
-    timestamp: new Date().toISOString()
-  });
-
-  // Create a fresh MCP server instance for each request (stateless mode)
-  const server = new McpServer({ name: 'FreeCoinPrice', version: '1.0.0' });
-
+// Function to register all tools on a server instance
+function registerTools(server: McpServer) {
   server.tool('getSupportedCurrencies', 'Get supported currencies from CoinGecko', {}, async () => {
     logRequest('TOOL_CALL', { tool: 'getSupportedCurrencies', args: {} });
     
@@ -91,13 +78,12 @@ app.post('/mcp', async (req, res) => {
     }
   });
 
-  // Define a tool to get coin prices
   server.tool('getCoinPrice', 'Get coin prices', {
     ids: z.string().optional().describe("Comma-separated list of coin IDs"),
     names: z.string().optional().describe("Comma-separated list of coin names"),
     symbols: z.string().optional().describe("Comma-separated list of coin symbols"),
     vs_currencies: z.string().default("usd").describe("Comma-separated list of target currencies")
-  }, async ({ ids,names,symbols ,vs_currencies }) => {
+  }, async ({ ids, names, symbols, vs_currencies }) => {
     const args = { ids, names, symbols, vs_currencies };
     logRequest('TOOL_CALL', { tool: 'getCoinPrice', args });
     
@@ -151,7 +137,6 @@ app.post('/mcp', async (req, res) => {
     }
   });
 
-  // Define a tool to get public companies holdings
   server.tool('getPublicCompaniesHoldings', 'Get public companies Bitcoin or Ethereum holdings', {
     coin_id: z.enum(['bitcoin', 'ethereum']).describe("Coin ID - must be either 'bitcoin' or 'ethereum'")
   }, async ({ coin_id }) => {
@@ -200,7 +185,6 @@ app.post('/mcp', async (req, res) => {
     }
   });
 
-  // Define a tool to get historical chart data for a coin
   server.tool('getCoinHistoricalChart', 'Get historical chart data for a coin including price, market cap and volume', {
     id: z.string().describe("Coin ID (e.g., 'bitcoin', 'ethereum')"),
     vs_currency: z.string().default("usd").describe("Target currency of market data (e.g., 'usd', 'eur')"),
@@ -263,7 +247,6 @@ app.post('/mcp', async (req, res) => {
     }
   });
 
-  // Define a tool to get coin OHLC chart data
   server.tool('getCoinOHLCChart', 
     `Get coin OHLC chart (Open, High, Low, Close) data.
     Data granularity (candle's body) is automatic:
@@ -330,7 +313,6 @@ app.post('/mcp', async (req, res) => {
     }
   });
 
-  // Define a tool to check API server status
   server.tool('checkApiStatus', 'Check API server status', {}, async () => {
     logRequest('TOOL_CALL', { tool: 'checkApiStatus', args: {} });
     
@@ -373,8 +355,71 @@ app.post('/mcp', async (req, res) => {
       return result;
     }
   });
+}
 
+// SSE endpoint for MCP connections (for Claude Desktop and other SSE clients)
+app.get('/sse', async (req, res) => {
+  logRequest('SSE_CONNECTION', {
+    method: req.method,
+    url: req.url,
+    headers: req.headers,
+    userAgent: req.get('User-Agent'),
+    ip: req.ip,
+    timestamp: new Date().toISOString()
+  });
 
+  // Create a fresh MCP server instance
+  const server = new McpServer({ name: 'FreeCoinPrice', version: '1.0.0' });
+  
+  // Register all tools
+  registerTools(server);
+
+  // Create SSE transport
+  const transport = new SSEServerTransport('/message', res);
+
+  // Clean up if client disconnects
+  res.on('close', () => {
+    logRequest('SSE_CONNECTION_CLOSED', {
+      timestamp: new Date().toISOString()
+    });
+    transport.close();
+    server.close();
+  });
+
+  // Connect the server to the transport
+  await server.connect(transport);
+});
+
+// Handle messages from SSE clients
+app.post('/message', async (req, res) => {
+  logRequest('SSE_MESSAGE', {
+    method: req.method,
+    url: req.url,
+    body: req.body,
+    timestamp: new Date().toISOString()
+  });
+
+  // SSE transport handles this internally
+  res.status(200).json({ status: 'ok' });
+});
+
+// Handle MCP requests via POST /mcp (for Streamable HTTP clients)
+app.post('/mcp', async (req, res) => {
+  logRequest('MCP_REQUEST', {
+    method: req.method,
+    url: req.url,
+    headers: req.headers,
+    body: req.body,
+    userAgent: req.get('User-Agent'),
+    ip: req.ip,
+    timestamp: new Date().toISOString()
+  });
+
+  // Create a fresh MCP server instance for each request (stateless mode)
+  const server = new McpServer({ name: 'FreeCoinPrice', version: '1.0.0' });
+  
+  // Register all tools
+  registerTools(server);
 
   // Create a streamable HTTP transport for this request (no session state)
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
@@ -399,6 +444,11 @@ app.listen(PORT, () => {
   logRequest('SERVER_START', {
     port: PORT,
     timestamp: new Date().toISOString(),
-    message: `MCP server listening on port ${PORT}`
+    message: `MCP server listening on port ${PORT}`,
+    endpoints: {
+      health: '/',
+      sse: '/sse (for Claude Desktop)',
+      streamableHttp: '/mcp (for other MCP clients)'
+    }
   });
 });
