@@ -1,0 +1,5 @@
+startCommand:
+  type: http
+  configSchema:
+
+  port: 3000
